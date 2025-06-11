@@ -6,6 +6,14 @@ import express from 'express';
 import fetch   from 'node-fetch';
 import admin   from 'firebase-admin';
 
+// Глобальные ловцы
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❗ Unhandled Rejection:', reason);
+});
+process.on('uncaughtException', err => {
+  console.error('❗ Uncaught Exception:', err);
+});
+
 // 2) Инициализируем Firebase Admin SDK один раз
 //    Подставьте сюда ваш реальный URL из консоли Firebase → Realtime Database → Rules:
 const DATABASE_URL = 'https://bolt-abd52-default-rtdb.europe-west1.firebasedatabase.app';
@@ -29,7 +37,7 @@ const VIEWPORT = {
 // Заголовки и тело для Bolt poll
 const BOLT_URL_BASE = 'https://user.live.boltsvc.net/mobility/search/poll';
 const BOLT_HEADERS = {
-  'Authorization': 'Basic KzM3MjU1NTkyOTc4OjQ0OTdiOWNiLWU5YTctNDVlYS1hZGM3LWRlODEyNWMxZDRkNQ==',
+  'Authorization': 'Basic KzM3MjU4NTI5ODI3OjVkYTExMjNiLTFiNGQtNDhlNS1hMWE4LTBmN2FmOGUzZGViYw==',
   'Content-Type':  'application/json; charset=UTF-8'
 };
 const BOLT_BODY = {
@@ -42,69 +50,74 @@ const BOLT_BODY = {
 
 // 4) Функция один раз дергает API и пушит результаты
 async function collectOnce() {
-  const db   = admin.database();
-  const data = await fetch(
-    `${BOLT_URL_BASE}?` + new URLSearchParams({
-      version:           'CA.120.0',
-      deviceId:          'eC8xpscwSm6L7gE_J7AiyV',
-      device_name:       'Googlesdk_gphone64_x86_64',
-      device_os_version: '13',
-      channel:           'googleplay',
-      brand:             'bolt',
-      deviceType:        'android',
-      country:           'ee',
-      language:          'en',
-      gps_lat:           CENTER.lat.toString(),
-      gps_lng:           CENTER.lng.toString(),
-      gps_accuracy_m:    '5.0',
-      gps_age:           '0'
-    }),
-    {
-      method: 'POST',
-      headers: BOLT_HEADERS,
-      body: JSON.stringify(BOLT_BODY)
+  try {
+    const db   = admin.database();
+    const data = await fetch(
+      `${BOLT_URL_BASE}?` + new URLSearchParams({
+        version:           'CA.120.0',
+        deviceId:          'dUdQ7W7qRvOz0Pl6swSSju',
+        device_name:       'Googlesdk_gphone64_x86_64',
+        device_os_version: '13',
+        channel:           'googleplay',
+        brand:             'bolt',
+        deviceType:        'android',
+        country:           'ee',
+        language:          'en',
+        gps_lat:           CENTER.lat.toString(),
+        gps_lng:           CENTER.lng.toString(),
+        gps_accuracy_m:    '5.0',
+        gps_age:           '0'
+      }),
+      {
+        method: 'POST',
+        headers: BOLT_HEADERS,
+        body: JSON.stringify(BOLT_BODY)
+      }
+    );
+
+    if (!data.ok) {
+      console.error(`Bolt API HTTP ${data.status}`);
+      return;
     }
-  );
 
-  if (!data.ok) {
-    console.error(`Bolt API HTTP ${data.status}`);
-    return;
-  }
+    const json   = await data.json();
+    const modes  = json.data?.vehicles || {};
+    const unique = new Map();
 
-  const json   = await data.json();
-  const modes  = json.data?.vehicles || {};
-  const unique = new Map();
-
-  // Дедупликация по ID
-  for (const mode of Object.values(modes)) {
-    for (const arr of Object.values(mode)) {
-      if (!Array.isArray(arr)) continue;
-      for (const v of arr) {
-        if (
-          v &&
-          typeof v.id === 'string' &&
-          typeof v.lat === 'number' &&
-          typeof v.lng === 'number'
-        ) {
-          unique.set(v.id, {
-            id:      v.id,
-            lat:     v.lat,
-            lng:     v.lng,
-            bearing: typeof v.bearing === 'number' ? v.bearing : 0
-          });
+    // Дедупликация по ID
+    for (const mode of Object.values(modes)) {
+      for (const arr of Object.values(mode)) {
+        if (!Array.isArray(arr)) continue;
+        for (const v of arr) {
+          if (
+            v &&
+            typeof v.id  === 'string' &&
+            typeof v.lat === 'number' &&
+            typeof v.lng === 'number'
+          ) {
+            unique.set(v.id, {
+              id:      v.id,
+              lat:     v.lat,
+              lng:     v.lng,
+              bearing: typeof v.bearing === 'number' ? v.bearing : 0
+            });
+          }
         }
       }
     }
+
+    const vehicles = Array.from(unique.values());
+    await db.ref(VEHICLES_PATH).set({
+      timestamp: admin.database.ServerValue.TIMESTAMP,
+      count:     vehicles.length,
+      list:      vehicles
+    });
+
+    console.log(`✓ Saved ${vehicles.length} vehicles @ ${new Date().toISOString()}`);
+  } catch (err) {
+    // Ловим любые ошибки внутри collectOnce, логируем и не кидаем дальше
+    console.error('❗ collectOnce error (ignored):', err);
   }
-
-  const vehicles = Array.from(unique.values());
-  await db.ref(VEHICLES_PATH).set({
-    timestamp: admin.database.ServerValue.TIMESTAMP,
-    count:     vehicles.length,
-    list:      vehicles
-  });
-
-  console.log(`✓ Saved ${vehicles.length} vehicles @ ${new Date().toISOString()}`);
 }
 
 // 5) Express-сервер для Cloud Run — health check + запуск фонового цикла
